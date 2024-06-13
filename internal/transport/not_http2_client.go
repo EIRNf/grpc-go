@@ -2,9 +2,13 @@ package transport
 
 import (
 	"context"
+	"io"
 	"net"
+	"runtime"
 	"sync"
+
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -39,7 +43,7 @@ type not_http2Client struct {
 	http2Client
 }
 
-func not_dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, useProxy bool, grpcUA string) (net.Conn, error) {
+func notnets_dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, useProxy bool, grpcUA string) (net.Conn, error) {
 
 	address := addr.Addr
 
@@ -47,6 +51,7 @@ func not_dial(ctx context.Context, fn func(context.Context, string) (net.Conn, e
 		ClientSide:  true,
 		local_addr:  &NotnetsAddr{basic: address}, //TODO FIX
 		remote_addr: &NotnetsAddr{basic: address},
+		connectCtx:  &ctx,
 	}
 	conn.isConnected = false
 
@@ -54,7 +59,7 @@ func not_dial(ctx context.Context, fn func(context.Context, string) (net.Conn, e
 	if logger.V(logLevel) {
 		logger.Infof("Client: Opening New Channel %s,%s\n", conn.local_addr, conn.remote_addr)
 	}
-	conn.queues = ClientOpen(conn.local_addr, conn.remote_addr, 214) //TODO FIX
+	conn.queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), 214) //TODO FIX
 
 	if conn.queues == nil { //if null means server doesn't exist yet
 		for {
@@ -73,7 +78,7 @@ func not_dial(ctx context.Context, fn func(context.Context, string) (net.Conn, e
 			}
 			timer := time.NewTimer(tempDelay)
 			<-timer.C
-			conn.queues = ClientOpen(conn.local_addr, conn.remote_addr, 214)
+			conn.queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), 214)
 			if conn.queues != nil {
 				break
 			}
@@ -105,7 +110,7 @@ func newNotHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, o
 	// address specific arbitrary data to reach custom dialers and credential handshakers.
 	connectCtx = icredentials.NewClientHandshakeInfoContext(connectCtx, credentials.ClientHandshakeInfo{Attributes: addr.Attributes})
 
-	conn, err := not_dial(connectCtx, opts.Dialer, addr, opts.UseProxy, opts.UserAgent)
+	conn, err := notnets_dial(connectCtx, opts.Dialer, addr, opts.UseProxy, opts.UserAgent)
 	if err != nil {
 		if opts.FailOnNonTempDialError {
 			return nil, connectionErrorf(isTemporary(err), err, "transport: error while dialing: %v", err)
@@ -379,6 +384,7 @@ type NotnetsConn struct {
 	read_mu        sync.Mutex
 	write_mu       sync.Mutex
 	queues         *QueueContext
+	connectCtx     *context.Context
 	local_addr     net.Addr
 	remote_addr    net.Addr
 	deadline       time.Time
@@ -386,19 +392,50 @@ type NotnetsConn struct {
 	write_deadline time.Time
 }
 
+func (c *NotnetsConn) ok() bool { return c != nil && c.queues != nil }
+
+func (c *NotnetsConn) internalRead(b []byte) (n int, err error) {
+
+	//Supposed to prevent the releasing of resources by certain configured functions? See fd_posix.go
+	runtime.KeepAlive(c.queues) //TODO: What does this do?
+
+	//Hadle not ready read
+	if c.queues == nil {
+		return 0, nil
+	}
+
+	if len(b) == 0 {
+		// If the caller wanted a zero byte read, return immediately
+		// without trying (but after acquiring the readLock).
+		// Otherwise syscall.Read returns 0, nil which looks like
+		// io.EOF.
+		return 0, nil
+	}
+
+	if c.ClientSide {
+		n, err = c.queues.ClientReceiveBuf(b, len(b))
+
+	} else { //Server read
+		n, err = c.queues.ServerReceiveBuf(b, len(b))
+	}
+
+	return n, err
+}
+
 // TODO: Error handling, timeouts
 func (c *NotnetsConn) Read(b []byte) (n int, err error) {
-	c.read_mu.Lock()
-	var leftover_bytes int
-	if c.ClientSide {
-		leftover_bytes = c.queues.ClientReceiveBuf(b, len(b))
-		// if leftover_bytes == -1 {
-		// }
-	} else { //Server read
-		leftover_bytes = c.queues.ServerReceiveBuf(b, len(b))
+	if !c.ok() {
+		return 0, syscall.EINVAL
 	}
+
+	c.read_mu.Lock()
+	n, err = c.internalRead(b)
 	c.read_mu.Unlock()
-	return leftover_bytes, nil
+
+	if err != nil && err != io.EOF {
+		err = &net.OpError{Op: "read", Net: c.local_addr.Network(), Source: c.LocalAddr(), Addr: c.RemoteAddr(), Err: err}
+	}
+	return n, err
 }
 
 // TODO: Error handling, timeouts
@@ -406,12 +443,12 @@ func (c *NotnetsConn) Write(b []byte) (n int, err error) {
 	c.write_mu.Lock()
 	var size int32
 	if c.ClientSide {
-		size = c.queues.ClientSendRpc(b, len(b))
+		size, err = c.queues.ClientSendRpc(b, len(b))
 	} else { //Server read
-		size = c.queues.ServerSendRpc(b, len(b))
+		size, err = c.queues.ServerSendRpc(b, len(b))
 	}
 	c.write_mu.Unlock()
-	return int(size), nil
+	return int(size), err
 }
 
 // TODO: Error handling, timeouts
@@ -426,15 +463,12 @@ func (c *NotnetsConn) Close() error {
 	return nil
 }
 
-// TODO: Error handling, timeouts
 func (c *NotnetsConn) LocalAddr() net.Addr {
 	return c.local_addr
 }
 
-// TODO: Error handling, timeouts
 func (c *NotnetsConn) RemoteAddr() net.Addr {
 	return c.remote_addr
-
 }
 
 // TODO: Error handling, timeouts

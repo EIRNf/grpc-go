@@ -1,0 +1,3 @@
+[submodule "internal/transport/notnets_shm"]
+	path = internal/transport/notnets_shm
+	url = https://github.com/EIRNf/notnets_shm.git

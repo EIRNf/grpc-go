@@ -40,7 +40,7 @@ func (addr *NotnetsAddr) String() string {
 }
 
 type not_http2Client struct {
-	http2Client
+	*http2Client
 }
 
 func notnets_dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, useProxy bool, grpcUA string) (net.Conn, error) {
@@ -214,6 +214,7 @@ func newNotHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, o
 		maxHeaderListSize = *opts.MaxHeaderListSize
 	}
 
+	/// TODO
 	t := &http2Client{
 		ctx:                   ctx,
 		ctxDone:               ctx.Done(), // Cache Done chan.
@@ -371,7 +372,7 @@ func newNotHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, o
 	}()
 
 	not_t := &not_http2Client{
-		http2Client: *t,
+		http2Client: t,
 	}
 
 	return not_t, nil
@@ -397,9 +398,9 @@ func (c *NotnetsConn) ok() bool { return c != nil && c.queues != nil }
 func (c *NotnetsConn) internalRead(b []byte) (n int, err error) {
 
 	//Supposed to prevent the releasing of resources by certain configured functions? See fd_posix.go
-	runtime.KeepAlive(c.queues) //TODO: What does this do?
+	runtime.KeepAlive(c) //TODO: What does this do?
 
-	//Hadle not ready read
+	//Handle not ready read
 	if c.queues == nil {
 		return 0, nil
 	}
@@ -441,11 +442,20 @@ func (c *NotnetsConn) Read(b []byte) (n int, err error) {
 // TODO: Error handling, timeouts
 func (c *NotnetsConn) Write(b []byte) (n int, err error) {
 	c.write_mu.Lock()
+
+	runtime.KeepAlive(c)
+
 	var size int32
 	if c.ClientSide {
 		size, err = c.queues.ClientSendRpc(b, len(b))
-	} else { //Server read
+	} else { //Server write
 		size, err = c.queues.ServerSendRpc(b, len(b))
+	}
+	if err != nil {
+		return int(size), err
+	}
+	if size == 0 {
+		return int(size), io.ErrUnexpectedEOF
 	}
 	c.write_mu.Unlock()
 	return int(size), err
@@ -453,6 +463,7 @@ func (c *NotnetsConn) Write(b []byte) (n int, err error) {
 
 // TODO: Error handling, timeouts
 func (c *NotnetsConn) Close() error {
+	runtime.SetFinalizer(c, nil)
 	var err error
 	ret := ClientClose(c.local_addr.String(), c.remote_addr.String())
 	// Error closing
@@ -461,6 +472,12 @@ func (c *NotnetsConn) Close() error {
 		return err
 	}
 	return nil
+}
+
+func (c *NotnetsConn) setAddr(laddr, raddr net.Addr) {
+	c.local_addr = laddr
+	c.remote_addr = raddr
+	runtime.SetFinalizer(c, c.Close())
 }
 
 func (c *NotnetsConn) LocalAddr() net.Addr {

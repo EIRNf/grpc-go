@@ -818,6 +818,172 @@ func (l *listenSocket) Close() error {
 	return err
 }
 
+// TODO
+func (s *Server) NotnetsServe(lis net.Listener) error {
+	s.mu.Lock()
+	s.printf("serving")
+	s.serve = true
+	if s.lis == nil {
+		// Serve called after Stop or GracefulStop.
+		s.mu.Unlock()
+		lis.Close()
+		return ErrServerStopped
+	}
+
+	s.serveWG.Add(1)
+	defer func() {
+		s.serveWG.Done()
+		if s.quit.HasFired() {
+			// Stop or GracefulStop called; block until done and return nil.
+			<-s.done.Done()
+		}
+	}()
+
+	ls := &listenSocket{
+		Listener: lis,
+		channelz: channelz.RegisterSocket(&channelz.Socket{
+			SocketType:    channelz.SocketTypeListen,
+			Parent:        s.channelz,
+			RefName:       lis.Addr().String(),
+			LocalAddr:     lis.Addr(),
+			SocketOptions: channelz.GetSocketOption(lis)},
+		),
+	}
+	s.lis[ls] = true
+
+	defer func() {
+		s.mu.Lock()
+		if s.lis != nil && s.lis[ls] {
+			ls.Close()
+			delete(s.lis, ls)
+		}
+		s.mu.Unlock()
+	}()
+
+	s.mu.Unlock()
+	channelz.Info(logger, ls.channelz, "ListenSocket created")
+
+	var tempDelay time.Duration // how long to sleep on accept failure
+	for {
+		rawConn, err := lis.Accept()
+		if err != nil {
+			if ne, ok := err.(interface {
+				Temporary() bool
+			}); ok && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if max := 1 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+				s.mu.Lock()
+				s.printf("Accept error: %v; retrying in %v", err, tempDelay)
+				s.mu.Unlock()
+				timer := time.NewTimer(tempDelay)
+				select {
+				case <-timer.C:
+				case <-s.quit.Done():
+					timer.Stop()
+					return nil
+				}
+				continue
+			}
+			s.mu.Lock()
+			s.printf("done serving; Accept = %v", err)
+			s.mu.Unlock()
+
+			if s.quit.HasFired() {
+				return nil
+			}
+			return err
+		}
+		tempDelay = 0
+		// Start a new goroutine to deal with rawConn so we don't stall this Accept
+		// loop goroutine.
+		//
+		// Make sure we account for the goroutine so GracefulStop doesn't nil out
+		// s.conns before this conn can be added.
+		s.serveWG.Add(1)
+		go func() {
+			s.handleNotnetsRawConn(lis.Addr().String(), rawConn)
+			s.serveWG.Done()
+		}()
+	}
+}
+
+// handleRawConn forks a goroutine to handle a just-accepted connection that
+// has not had any I/O performed on it yet.
+func (s *Server) handleNotnetsRawConn(lisAddr string, rawConn net.Conn) {
+	if s.quit.HasFired() {
+		rawConn.Close()
+		return
+	}
+	rawConn.SetDeadline(time.Now().Add(s.opts.connectionTimeout))
+
+	// Finish handshaking (HTTP2)
+	st := s.newNotnetsTransport(rawConn)
+	rawConn.SetDeadline(time.Time{})
+	if st == nil {
+		return
+	}
+
+	if cc, ok := rawConn.(interface {
+		PassServerTransport(transport.ServerTransport)
+	}); ok {
+		cc.PassServerTransport(st)
+	}
+
+	if !s.addConn(lisAddr, st) {
+		return
+	}
+	go func() {
+		s.serveStreams(context.Background(), st, rawConn)
+		s.removeConn(lisAddr, st)
+	}()
+}
+
+// newHTTP2Transport sets up a http/2 transport (using the
+// gRPC http2 server transport in transport/http2_server.go).
+func (s *Server) newNotnetsTransport(c net.Conn) transport.ServerTransport {
+	config := &transport.ServerConfig{
+		MaxStreams:            s.opts.maxConcurrentStreams,
+		ConnectionTimeout:     s.opts.connectionTimeout,
+		Credentials:           s.opts.creds,
+		InTapHandle:           s.opts.inTapHandle,
+		StatsHandlers:         s.opts.statsHandlers,
+		KeepaliveParams:       s.opts.keepaliveParams,
+		KeepalivePolicy:       s.opts.keepalivePolicy,
+		InitialWindowSize:     s.opts.initialWindowSize,
+		InitialConnWindowSize: s.opts.initialConnWindowSize,
+		WriteBufferSize:       s.opts.writeBufferSize,
+		ReadBufferSize:        s.opts.readBufferSize,
+		SharedWriteBuffer:     s.opts.sharedWriteBuffer,
+		ChannelzParent:        s.channelz,
+		MaxHeaderListSize:     s.opts.maxHeaderListSize,
+		HeaderTableSize:       s.opts.headerTableSize,
+	}
+	st, err := transport.NewNotnetsServerTransport(c, config)
+	if err != nil {
+		s.mu.Lock()
+		s.errorf("NewServerTransport(%q) failed: %v", c.RemoteAddr(), err)
+		s.mu.Unlock()
+		// ErrConnDispatched means that the connection was dispatched away from
+		// gRPC; those connections should be left open.
+		if err != credentials.ErrConnDispatched {
+			// Don't log on ErrConnDispatched and io.EOF to prevent log spam.
+			if err != io.EOF {
+				channelz.Info(logger, s.channelz, "grpc: Server.Serve failed to create ServerTransport: ", err)
+			}
+			c.Close()
+		}
+		return nil
+	}
+
+	return st
+}
+
 // Serve accepts incoming connections on the listener lis, creating a new
 // ServerTransport and service goroutine for each. The service goroutines
 // read gRPC requests and then call the registered handlers to reply to them.

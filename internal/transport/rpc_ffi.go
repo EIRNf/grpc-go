@@ -83,6 +83,8 @@ func (conn *QueueContext) ClientSendRpc(buf []byte, size int) (ret int32, err er
 }
 
 // client_receive_buf
+// TODO: Make this behave like socket read.
+// Return
 func (conn *QueueContext) ClientReceiveBuf(buf []byte, size int) (ret int, err error) {
 	_buf := unsafe.Pointer(&buf[0])
 	_size := C.size_t(size)

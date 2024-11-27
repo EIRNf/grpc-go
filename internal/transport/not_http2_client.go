@@ -54,12 +54,13 @@ func notnets_dial(ctx context.Context, fn func(context.Context, string) (net.Con
 		connectCtx:  &ctx,
 	}
 	conn.isConnected = false
+	conn.message_size = 1024 //TODO FIX
 
 	var tempDelay time.Duration
 	if logger.V(logLevel) {
 		logger.Infof("Client: Opening New Channel %s,%s\n", conn.local_addr, conn.remote_addr)
 	}
-	conn.queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), 214) //TODO FIX
+	conn.queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), conn.message_size) //TODO FIX
 
 	if conn.queues == nil { //if null means server doesn't exist yet
 		for {
@@ -78,7 +79,7 @@ func notnets_dial(ctx context.Context, fn func(context.Context, string) (net.Con
 			}
 			timer := time.NewTimer(tempDelay)
 			<-timer.C
-			conn.queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), 214)
+			conn.queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), conn.message_size)
 			if conn.queues != nil {
 				break
 			}
@@ -381,6 +382,8 @@ func newNotHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, o
 type NotnetsConn struct {
 	ClientSide  bool
 	isConnected bool
+	message_size int32
+
 
 	read_mu        sync.Mutex
 	write_mu       sync.Mutex
@@ -414,13 +417,13 @@ func (c *NotnetsConn) internalRead(b []byte) (n int, err error) {
 	}
 
 	if c.ClientSide {
-		n, err = c.queues.ClientReceiveBuf(b, len(b))
+		n = c.queues.ClientReceiveBuf(b, len(b))
 
 	} else { //Server read
-		n, err = c.queues.ServerReceiveBuf(b, len(b))
+		n = c.queues.ServerReceiveBuf(b, len(b))
 	}
 
-	return n, err
+	return n, nil 
 }
 
 // TODO: Error handling, timeouts
@@ -447,9 +450,9 @@ func (c *NotnetsConn) Write(b []byte) (n int, err error) {
 
 	var size int32
 	if c.ClientSide {
-		size, err = c.queues.ClientSendRpc(b, len(b))
+		size = c.queues.ClientSendRpc(b, len(b))
 	} else { //Server write
-		size, err = c.queues.ServerSendRpc(b, len(b))
+		size = c.queues.ServerSendRpc(b, len(b))
 	}
 	if err != nil {
 		return int(size), err

@@ -27,7 +27,7 @@ type NotnetsListener struct {
 	addr            NotnetsAddr
 }
 
-func Listen(addr string) *NotnetsListener {
+func NotnetsListen(addr string) *NotnetsListener {
 	var lis NotnetsListener
 	log.Info().Msgf("New Listener at: %s", addr)
 
@@ -46,9 +46,9 @@ func (lis *NotnetsListener) Accept() (conn net.Conn, err error) {
 		conn = &NotnetsConn{
 			ClientSide:  false, //This is the server implementation
 			isConnected: true,
-			queues:      queue,
+			Queues:      queue,
 			local_addr:  &lis.addr,
-			// remote_addr: ,
+			remote_addr: &NotnetsAddr{basic: "localhost"},
 		}
 	} else {
 		conn = nil

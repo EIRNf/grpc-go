@@ -20,7 +20,7 @@ import (
 const MESSAGE_SIZE = 2048
 
 type QueueContext struct {
-	queues *QueuePair
+	Queues *QueuePair
 	qt     C.QUEUE_TYPE
 	fn     unsafe.Pointer
 	// pinner runtime.Pinner
@@ -56,7 +56,7 @@ func ClientOpen(sourceAddr string, destinationAddr string, messageSize int32) (r
 	}
 
 	ret = &QueueContext{
-		queues: &QueuePair{
+		Queues: &QueuePair{
 			ClientId:        int(_ret.queues.client_id),
 			RequestShmaddr:  _ret.queues.request_shmaddr,
 			ResponseShmaddr: _ret.queues.response_shmaddr,
@@ -135,7 +135,7 @@ func (handler *ServerContext) Accept() (ret *QueueContext) {
 		return nil
 	}
 	ret = &QueueContext{
-		queues: &QueuePair{
+		Queues: &QueuePair{
 			ClientId:        int(_ret.queues.client_id),
 			RequestShmaddr:  _ret.queues.request_shmaddr,
 			ResponseShmaddr: _ret.queues.response_shmaddr,

@@ -1,16 +1,18 @@
 module google.golang.org/grpc
 
-go 1.21
+go 1.22
 
 toolchain go1.22.1
 
 require (
+	github.com/aclements/go-moremath v0.0.0-20241023150245-c8bbc672ef66
 	github.com/cespare/xxhash/v2 v2.2.0
 	github.com/cncf/xds/go v0.0.0-20240318125728-8a4994d93e50
 	github.com/envoyproxy/go-control-plane v0.12.0
 	github.com/golang/glog v1.2.0
 	github.com/google/go-cmp v0.6.0
 	github.com/google/uuid v1.6.0
+	github.com/loov/hrtime v1.0.3
 	golang.org/x/net v0.22.0
 	golang.org/x/oauth2 v0.18.0
 	golang.org/x/sync v0.7.0

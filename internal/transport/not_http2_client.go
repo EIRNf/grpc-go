@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 
 	"sync/atomic"
@@ -36,7 +37,7 @@ func (addr *NotnetsAddr) Network() string {
 }
 
 func (addr *NotnetsAddr) String() string {
-	return "notnets:" + addr.basic
+	return  addr.basic
 }
 
 type not_http2Client struct {
@@ -45,7 +46,10 @@ type not_http2Client struct {
 
 func notnets_dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, useProxy bool, grpcUA string) (net.Conn, error) {
 
+	
 	address := addr.Addr
+	address = strings.Split(address, ":")[3]
+
 
 	conn := &NotnetsConn{
 		ClientSide:  true,
@@ -60,9 +64,9 @@ func notnets_dial(ctx context.Context, fn func(context.Context, string) (net.Con
 	if logger.V(logLevel) {
 		logger.Infof("Client: Opening New Channel %s,%s\n", conn.local_addr, conn.remote_addr)
 	}
-	conn.queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), conn.message_size) //TODO FIX
+	conn.Queues = ClientOpen("local" + conn.local_addr.String(), conn.remote_addr.String(), conn.message_size) //TODO FIX
 
-	if conn.queues == nil { //if null means server doesn't exist yet
+	if conn.Queues == nil { //if null means server doesn't exist yet
 		for {
 			if logger.V(logLevel) {
 				logger.Infof("Client: Opening New Channel Failed: Try Again\n")
@@ -79,17 +83,17 @@ func notnets_dial(ctx context.Context, fn func(context.Context, string) (net.Con
 			}
 			timer := time.NewTimer(tempDelay)
 			<-timer.C
-			conn.queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), conn.message_size)
-			if conn.queues != nil {
+			conn.Queues = ClientOpen(conn.local_addr.String(), conn.remote_addr.String(), conn.message_size)
+			if conn.Queues != nil {
 				break
 			}
 		}
 	}
 
 	if logger.V(logLevel) {
-		logger.Infof("Client: New Channel: %v \n ", conn.queues.queues.ClientId)
-		logger.Infof("Client: New Channel RequestShmid: %v \n ", conn.queues.queues.RequestShmaddr)
-		logger.Infof("Client: New Channel RespomseShmid: %v \n ", conn.queues.queues.ResponseShmaddr)
+		logger.Infof("Client: New Channel: %v \n ", conn.Queues.Queues.ClientId)
+		logger.Infof("Client: New Channel RequestShmid: %v \n ", conn.Queues.Queues.RequestShmaddr)
+		logger.Infof("Client: New Channel RespomseShmid: %v \n ", conn.Queues.Queues.ResponseShmaddr)
 
 	}
 	conn.isConnected = true
@@ -387,7 +391,7 @@ type NotnetsConn struct {
 
 	read_mu        sync.Mutex
 	write_mu       sync.Mutex
-	queues         *QueueContext
+	Queues         *QueueContext
 	connectCtx     *context.Context
 	local_addr     net.Addr
 	remote_addr    net.Addr
@@ -396,7 +400,7 @@ type NotnetsConn struct {
 	write_deadline time.Time
 }
 
-func (c *NotnetsConn) ok() bool { return c != nil && c.queues != nil }
+func (c *NotnetsConn) ok() bool { return c != nil && c.Queues != nil }
 
 func (c *NotnetsConn) internalRead(b []byte) (n int, err error) {
 
@@ -404,7 +408,7 @@ func (c *NotnetsConn) internalRead(b []byte) (n int, err error) {
 	runtime.KeepAlive(c) //TODO: What does this do?
 
 	//Handle not ready read
-	if c.queues == nil {
+	if c.Queues == nil {
 		return 0, nil
 	}
 
@@ -417,10 +421,10 @@ func (c *NotnetsConn) internalRead(b []byte) (n int, err error) {
 	}
 
 	if c.ClientSide {
-		n = c.queues.ClientReceiveBuf(b, len(b))
+		n = c.Queues.ClientReceiveBuf(b, len(b))
 
 	} else { //Server read
-		n = c.queues.ServerReceiveBuf(b, len(b))
+		n = c.Queues.ServerReceiveBuf(b, len(b))
 	}
 
 	return n, nil 
@@ -450,9 +454,9 @@ func (c *NotnetsConn) Write(b []byte) (n int, err error) {
 
 	var size int32
 	if c.ClientSide {
-		size = c.queues.ClientSendRpc(b, len(b))
+		size = c.Queues.ClientSendRpc(b, len(b))
 	} else { //Server write
-		size = c.queues.ServerSendRpc(b, len(b))
+		size = c.Queues.ServerSendRpc(b, len(b))
 	}
 	if err != nil {
 		return int(size), err

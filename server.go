@@ -33,6 +33,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding"
@@ -863,6 +864,9 @@ func (s *Server) NotnetsServe(lis net.Listener) error {
 	s.mu.Unlock()
 	channelz.Info(logger, ls.channelz, "ListenSocket created")
 
+	var conn_map sync.Map
+
+
 	var tempDelay time.Duration // how long to sleep on accept failure
 	for {
 		rawConn, err := lis.Accept()
@@ -899,17 +903,64 @@ func (s *Server) NotnetsServe(lis net.Listener) error {
 			}
 			return err
 		}
-		tempDelay = 0
-		// Start a new goroutine to deal with rawConn so we don't stall this Accept
-		// loop goroutine.
-		//
-		// Make sure we account for the goroutine so GracefulStop doesn't nil out
-		// s.conns before this conn can be added.
-		s.serveWG.Add(1)
-		go func() {
-			s.handleNotnetsRawConn(lis.Addr().String(), rawConn)
-			s.serveWG.Done()
-		}()
+
+		if rawConn == nil {
+			log.Trace().Msgf("Null queue_pair, backoff")
+
+			if tempDelay == 0 {
+				tempDelay = 3 * time.Second
+			} else {
+				tempDelay *= 2
+			}
+			if max := 25 * time.Second; tempDelay > max {
+				tempDelay = max
+			}
+			timer := time.NewTimer(tempDelay)
+			select {
+			case <-timer.C:
+				// case <-s.quit.Done():
+				// 	timer.Stop()
+				// 	return nil
+			}
+			continue
+		}
+
+		//Check we have not accepted this in the past
+		_, ok := conn_map.Load(rawConn.(*transport.NotnetsConn).Queues.Queues.ClientId)
+		if ok {
+			log.Trace().Msg("Already served queue_pair, backoff")
+
+			if tempDelay == 0 {
+				tempDelay = 3 * time.Second
+			} else {
+				tempDelay *= 2
+			}
+			if max := 25 * time.Second; tempDelay > max {
+				tempDelay = max
+			}
+			timer := time.NewTimer(tempDelay)
+			select {
+			case <-timer.C:
+				// case <-s.quit.Done():
+				// 	timer.Stop()
+				// 	return nil
+			}
+			continue
+		} else {
+			conn_map.Store(rawConn.(*transport.NotnetsConn).Queues.Queues.ClientId, rawConn)
+
+			tempDelay = 0
+			// Start a new goroutine to deal with rawConn so we don't stall this Accept
+			// loop goroutine.
+			//
+			// Make sure we account for the goroutine so GracefulStop doesn't nil out
+			// s.conns before this conn can be added.
+			s.serveWG.Add(1)
+			go func() {
+				s.handleNotnetsRawConn(lis.Addr().String(), rawConn)
+				s.serveWG.Done()
+			}()
+		}
 	}
 }
 
@@ -920,7 +971,7 @@ func (s *Server) handleNotnetsRawConn(lisAddr string, rawConn net.Conn) {
 		rawConn.Close()
 		return
 	}
-	rawConn.SetDeadline(time.Now().Add(s.opts.connectionTimeout))
+	// rawConn.SetDeadline(time.Now().Add(s.opts.connectionTimeout))
 
 	// Finish handshaking (HTTP2)
 	st := s.newNotnetsTransport(rawConn)
